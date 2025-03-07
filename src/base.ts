@@ -33,141 +33,97 @@ import type {
 
 import { Agent } from "https";
 import axios, { Method } from "axios";
-import { AccessToken, ResourceOwnerPassword } from "simple-oauth2";
 import { TadoError } from "./types";
 
-const EXPIRATION_WINDOW_IN_SECONDS = 300;
-
-const tado_auth_url = "https://auth.tado.com";
+const tado_auth_url = "https://login.tado.com/oauth2/token";
+const tado_device_auth_url = "https://login.tado.com/oauth2/device_authorize";
 const tado_url = "https://my.tado.com";
-const tado_config = {
-  client: {
-    id: "tado-web-app",
-    secret: "wZaRN7rpjn3FoNyF5IFuxg9uMzYJcvOoQ8QWiIqS3hfk6gLhVlG57j5YNoZL2Rtc",
-  },
-  auth: {
-    tokenHost: tado_auth_url,
-  },
-};
-
-const client = new ResourceOwnerPassword(tado_config);
+const client_id = "1bb50063-6b0c-4d11-bd99-387f4a91cc46";
 
 export class BaseTado {
   #httpsAgent: Agent;
-  #accessToken?: AccessToken | undefined;
-  #username?: string;
-  #password?: string;
+  #accessToken?: string;
+  #refreshToken?: string;
 
-  constructor(username?: string, password?: string) {
-    this.#username = username;
-    this.#password = password;
+  constructor() {
     this.#httpsAgent = new Agent({ keepAlive: true });
   }
 
-  async #login(): Promise<void> {
-    if (!this.#username || !this.#password) {
-      throw new Error("Please login before using Tado!");
-    }
+  async initiateDeviceCodeFlow(): Promise<void> {
+    const response = await axios.post(tado_device_auth_url, null, {
+      params: {
+        client_id: client_id,
+        scope: "offline_access",
+      },
+    });
 
-    const tokenParams = {
-      username: this.#username,
-      password: this.#password,
-      scope: "home.user",
-    };
+    const data = response.data;
+    console.log(`Go to: ${data.verification_uri_complete} and enter code: ${data.user_code}`);
 
-    this.#accessToken = await client.getToken(tokenParams);
+    await this.pollForToken(data.device_code, data.interval);
   }
 
-  /**
-   * Refreshes the access token if it has expired or is about to expire.
-   *
-   * The method checks if an access token is available. If not, it attempts to login to obtain one.
-   * If the token is within the expiration window, it tries to refresh the token.
-   * In case of a failure during the refresh, it sets the token to null and attempts to login again.
-   *
-   * @returns A promise that resolves when the token has been refreshed or re-obtained.
-   * @throws {@link TadoError} if no access token is available after attempting to login.
-   */
-  async #refreshToken(): Promise<void> {
-    if (!this.#accessToken) {
-      await this.#login();
-    }
-
-    if (!this.#accessToken) {
-      throw new TadoError(`No access token available, even after login in.`);
-    }
-
-    // If the start of the window has passed, refresh the token
-    const shouldRefresh = this.#accessToken.expired(EXPIRATION_WINDOW_IN_SECONDS);
-
-    if (shouldRefresh) {
+  async pollForToken(device_code: string, interval: number): Promise<void> {
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, interval * 1000));
       try {
-        this.#accessToken = await this.#accessToken.refresh();
-      } catch (_error) {
-        this.#accessToken = undefined;
-        await this.#login();
+        const response = await axios.post(tado_auth_url, null, {
+          params: {
+            client_id: client_id,
+            device_code: device_code,
+            grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          },
+        });
+
+        this.#accessToken = response.data.access_token;
+        this.#refreshToken = response.data.refresh_token;
+        console.log("Successfully authenticated!");
+        break;
+      } catch (error) {
+        if (error.response && error.response.status !== 400) {
+          throw new Error("Failed to retrieve token.");
+        }
       }
     }
   }
 
-  get accessToken(): AccessToken | undefined {
-    return this.#accessToken;
-  }
-
-  /**
-   * Authenticates a user using the provided public client credentials, username and password.
-   * For more information see
-   * [https://support.tado.com/en/articles/8565472-how-do-i-update-my-rest-api-authentication-method-to-oauth-2](https://support.tado.com/en/articles/8565472-how-do-i-update-my-rest-api-authentication-method-to-oauth-2).
-   *
-   * @param username - The username of the user attempting to login.
-   * @param password - The password of the user attempting to login.
-   * @returns A promise that resolves when the login process is complete.
-   */
-  async login(username: string, password: string): Promise<void> {
-    this.#username = username;
-    this.#password = password;
-    await this.#login();
-  }
-
-  /**
-   * Makes an API call to the provided URL with the specified method and data.
-   *
-   * @typeParam R - The type of the response
-   * @typeParam T - The type of the request body
-   * @param url - The endpoint to which the request is sent. If the URL contains "https", it will be used as is.
-   * @param method - The HTTP method to use for the request (e.g., "get", "post").
-   * @param data - The payload to send with the request, if applicable.
-   * @returns A promise that resolves to the response data.
-   */
-  async apiCall<R, T = unknown>(url: string, method: Method = "get", data?: T): Promise<R> {
-    await this.#refreshToken();
-
-    let callUrl = tado_url + url;
-    if (url.includes("https")) {
-      callUrl = url;
+  async refreshToken(): Promise<void> {
+    if (!this.#refreshToken) {
+      throw new Error("No refresh token available.");
     }
+
+    const response = await axios.post(tado_auth_url, null, {
+      params: {
+        client_id: client_id,
+        grant_type: "refresh_token",
+        refresh_token: this.#refreshToken,
+      },
+    });
+
+    this.#accessToken = response.data.access_token;
+    this.#refreshToken = response.data.refresh_token;
+    console.log("Token refreshed successfully.");
+  }
+
+  async apiCall<R>(url: string, method: Method = "get", data?: any): Promise<R> {
+    if (!this.#accessToken) {
+      throw new Error("No access token available. Please authenticate first.");
+    }
+
     const request = {
-      url: callUrl,
+      url: tado_url + url,
       method: method,
       data: data,
       headers: {
-        Authorization: "Bearer " + this.#accessToken?.token.access_token,
+        Authorization: "Bearer " + this.#accessToken,
       },
       httpsAgent: this.#httpsAgent,
     };
-    if (method !== "get" && method !== "GET") {
-      request.data = data;
-    }
-    const response = await axios(request);
 
+    const response = await axios(request);
     return response.data as R;
   }
 
-  /**
-   * Fetches the current user data.
-   *
-   * @returns A promise that resolves to the user data.
-   */
   getMe(): Promise<Me> {
     return this.apiCall("/api/v2/me");
   }
