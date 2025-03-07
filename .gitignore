@@ -63,5 +63,3 @@ typings/
 # typedoc
 docs/
 
-# build output
-build/

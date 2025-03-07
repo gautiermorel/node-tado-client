@@ -32,7 +32,7 @@ import type {
 } from "./types";
 
 import { Agent } from "https";
-import axios, { Method } from "axios";
+import axios, { Method, AxiosError } from "axios";
 import { TadoError } from "./types";
 
 const tado_auth_url = "https://login.tado.com/oauth2/token";
@@ -79,8 +79,8 @@ export class BaseTado {
         this.#refreshToken = response.data.refresh_token;
         console.log("Successfully authenticated!");
         break;
-      } catch (error) {
-        if (error.response && error.response.status !== 400) {
+      }  catch (error: unknown) {
+        if (error instanceof AxiosError && error.response?.status !== 400) {
           throw new Error("Failed to retrieve token.");
         }
       }
